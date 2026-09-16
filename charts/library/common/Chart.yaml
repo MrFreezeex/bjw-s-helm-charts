@@ -18,4 +18,4 @@ annotations:
   artifacthub.io/changes: |-
     - kind: added
       description: |-
-        <tbd>
+        Added configurable recursive string template evaluation with path exclusions
