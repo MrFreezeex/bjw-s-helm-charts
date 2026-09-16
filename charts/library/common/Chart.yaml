@@ -18,4 +18,4 @@ annotations:
   artifacthub.io/changes: |-
     - kind: added
       description: |-
-        <tbd>
+        Added support for targeting multiple controllers by identifier or regular expression from NetworkPolicy resources
