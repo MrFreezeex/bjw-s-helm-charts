@@ -60,9 +60,10 @@ func (g *Generator) Generate(schemaBytes []byte) error {
 
 	if schema.Properties != nil {
 		keys := schemautil.SortedKeys(*schema.Properties)
+		generatedPaths := make(map[string]string)
 		for _, name := range keys {
 			prop := (*schema.Properties)[name]
-			if err := g.generatePropertyPageRecursive(name, prop, "", 1); err != nil {
+			if err := g.generatePropertyPageRecursive(name, prop, "", 1, generatedPaths); err != nil {
 				return fmt.Errorf("failed to generate page for %s: %w", name, err)
 			}
 		}
@@ -122,13 +123,12 @@ func (g *Generator) generateIndex(schema *jsonschema.Schema) error {
 // generatePropertyPageRecursive walks the schema tree, generating a page for
 // each property and recursing into nested objects. Depth is capped at
 // maxRecursionDepth as a safety net against cyclic schemas.
-func (g *Generator) generatePropertyPageRecursive(name string, prop *jsonschema.Schema, parentPath string, depth int) error {
+func (g *Generator) generatePropertyPageRecursive(name string, prop *jsonschema.Schema, parentPath string, depth int, generatedPaths map[string]string) error {
 	if depth > maxRecursionDepth {
 		return nil
 	}
 
-	// Use lowercase directory names to match Starlight's slug normalization.
-	dirName := strings.ToLower(name)
+	dirName := documentationSlug(name)
 	currentPath := dirName
 	if parentPath != "" {
 		currentPath = parentPath + "/" + dirName
@@ -142,6 +142,10 @@ func (g *Generator) generatePropertyPageRecursive(name string, prop *jsonschema.
 	if !isSubPath(g.OutputDir, outDir) {
 		return fmt.Errorf("property name %q escapes output directory", name)
 	}
+	if previousName, exists := generatedPaths[currentPath]; exists {
+		return fmt.Errorf("properties %q and %q map to the same documentation path %q", previousName, name, currentPath)
+	}
+	generatedPaths[currentPath] = name
 
 	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return err
@@ -155,7 +159,7 @@ func (g *Generator) generatePropertyPageRecursive(name string, prop *jsonschema.
 		for _, subName := range subKeys {
 			subProp := (*prop.Properties)[subName]
 			if hasNestedContent(subProp) {
-				if err := g.generatePropertyPageRecursive(subName, subProp, currentPath, depth+1); err != nil {
+				if err := g.generatePropertyPageRecursive(subName, subProp, currentPath, depth+1, generatedPaths); err != nil {
 					return fmt.Errorf("failed to generate sub-page for %s: %w", subName, err)
 				}
 			}
@@ -168,7 +172,7 @@ func (g *Generator) generatePropertyPageRecursive(name string, prop *jsonschema.
 		for _, subName := range subKeys {
 			subProp := allProps[subName]
 			if hasNestedContent(subProp) {
-				if err := g.generatePropertyPageRecursive(subName, subProp, currentPath, depth+1); err != nil {
+				if err := g.generatePropertyPageRecursive(subName, subProp, currentPath, depth+1, generatedPaths); err != nil {
 					return fmt.Errorf("failed to generate sub-page for %s: %w", subName, err)
 				}
 			}

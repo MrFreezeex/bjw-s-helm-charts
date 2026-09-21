@@ -114,6 +114,48 @@ func TestGenerator_Generate_IndexContent(t *testing.T) {
 	}
 }
 
+func TestGenerator_Generate_SafePropertyPaths(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"properties": {
+			".": {"type": "string"}
+		}
+	}`)
+
+	tmpDir := t.TempDir()
+	if err := NewGenerator(tmpDir).Generate(schema); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "key-2e", "index.mdx")); err != nil {
+		t.Fatalf("safe property page was not created: %v", err)
+	}
+	index, err := os.ReadFile(filepath.Join(tmpDir, "index.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), "title: Values Reference") || !strings.Contains(string(index), "./key-2e/") {
+		t.Errorf("root index was overwritten or has the wrong link:\n%s", index)
+	}
+}
+
+func TestGenerator_Generate_RejectsPropertyPathCollisions(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"properties": {
+			"Foo": {"type": "string"},
+			"foo": {"type": "string"}
+		}
+	}`)
+
+	err := NewGenerator(t.TempDir()).Generate(schema)
+	if err == nil {
+		t.Fatal("Generate should reject colliding documentation paths")
+	}
+	if !strings.Contains(err.Error(), `properties "Foo" and "foo" map to the same documentation path "foo"`) {
+		t.Fatalf("error = %q, want collision context", err)
+	}
+}
+
 func TestGenerator_Generate_AdditionalPropertiesDocumentation(t *testing.T) {
 	schema := []byte(`{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",

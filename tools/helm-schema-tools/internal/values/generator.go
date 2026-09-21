@@ -3,6 +3,7 @@ package values
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -154,7 +155,7 @@ func (g *Generator) buildEntry(key string, prop *jsonschema.Schema, fc fieldCtx)
 
 // fillValue returns keep=false when the entry should be dropped entirely.
 func (g *Generator) fillValue(e *Entry, prop *jsonschema.Schema, fc fieldCtx) (bool, error) {
-	if prop.Const != nil && prop.Const.IsSet && len(prop.Type) == 0 {
+	if prop.Const != nil && prop.Const.IsSet {
 		e.Value = constValue(prop)
 		return true, nil
 	}
@@ -313,12 +314,6 @@ func (g *Generator) fillString(e *Entry, prop *jsonschema.Schema, fc fieldCtx) {
 			return
 		}
 	}
-	if prop.Const != nil && prop.Const.IsSet {
-		if s, ok := prop.Const.Value.(string); ok {
-			e.Value = yamlQuoteString(s)
-			return
-		}
-	}
 	dummy := ""
 	if len(prop.Enum) > 0 {
 		if s, ok := prop.Enum[0].(string); ok {
@@ -370,7 +365,9 @@ func (g *Generator) fillBool(e *Entry, prop *jsonschema.Schema, fc fieldCtx) {
 	e.CommentOut = true
 }
 
-// constValue renders a pure const schema value as a YAML scalar string.
+// constValue renders a schema const as an inline YAML value. JSON flow values
+// are valid YAML, so objects and arrays remain valid without teaching the
+// line-oriented template how to render arbitrary nested constants.
 func constValue(prop *jsonschema.Schema) string {
 	switch v := prop.Const.Value.(type) {
 	case string:
@@ -378,6 +375,10 @@ func constValue(prop *jsonschema.Schema) string {
 	case bool:
 		return boolYAML(v)
 	default:
+		encoded, err := json.Marshal(v)
+		if err == nil {
+			return string(encoded)
+		}
 		return fmt.Sprintf("%v", v)
 	}
 }

@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"encoding/hex"
 	"fmt"
 	"html"
 	"strings"
@@ -32,10 +33,31 @@ func funcMap() template.FuncMap {
 		"descWithExtras": descriptionWithExtras,
 		"add1":           func(i int) int { return i + 1 },
 		"sub":            func(a, b int) int { return a - b },
-		"lower":          strings.ToLower,
+		"slug":           documentationSlug,
 		"allExamples":    collectAllExamples,
 		"mdxSafe":        mdxSafe,
 	}
+}
+
+// documentationSlug returns a single, safe directory and URL segment for a
+// schema property. Existing camelCase property names retain their historical
+// lowercase paths; other names are byte-encoded to prevent path traversal,
+// separators, and MDX-link ambiguity.
+func documentationSlug(name string) string {
+	lower := strings.ToLower(name)
+	if lower != "" {
+		safe := true
+		for _, r := range lower {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			return lower
+		}
+	}
+	return "key-" + hex.EncodeToString([]byte(name))
 }
 
 // typeString returns a display string for a schema's type.

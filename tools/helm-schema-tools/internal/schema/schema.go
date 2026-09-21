@@ -193,6 +193,52 @@ func normalizeCompilerURI(raw string) string {
 	return parsed.String()
 }
 
+// normalizeCompilerReference normalizes a complete resource URI while
+// preserving its JSON Pointer or anchor fragment. Relative references are
+// deliberately left alone: the compiler resolves those against the
+// normalized resource ID.
+func normalizeCompilerReference(raw string, normalizedIDs map[string]string) string {
+	resourceID, fragment, hasFragment := strings.Cut(raw, "#")
+	normalizedID, ok := normalizedIDs[resourceID]
+	if !ok {
+		return raw
+	}
+	if hasFragment {
+		return normalizedID + "#" + fragment
+	}
+	return normalizedID
+}
+
+// normalizeCompilerDocument applies URI normalization only to JSON Schema URI
+// keywords. Rewriting raw bytes can accidentally alter descriptions, examples,
+// or extension values that merely contain an ID-shaped string.
+func normalizeCompilerDocument(contents []byte, normalizedIDs map[string]string) ([]byte, error) {
+	document, err := decodeJSONDocument(contents)
+	if err != nil {
+		return nil, err
+	}
+	var visit func(any)
+	visit = func(value any) {
+		switch node := value.(type) {
+		case map[string]any:
+			for key, child := range node {
+				if key == "$id" || key == "$ref" || key == "$dynamicRef" {
+					if uri, ok := child.(string); ok {
+						node[key] = normalizeCompilerReference(uri, normalizedIDs)
+					}
+				}
+				visit(node[key])
+			}
+		case []any:
+			for _, child := range node {
+				visit(child)
+			}
+		}
+	}
+	visit(document)
+	return json.Marshal(document)
+}
+
 func pointerPathSegment(segment string) string {
 	return strings.NewReplacer("~", "~0", "/", "~1").Replace(segment)
 }
@@ -251,7 +297,11 @@ func collectLocalSchemaResources(inputPath string) (*localSchemaRegistry, error)
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || filepath.Ext(path) != ".json" {
+		// Charts commonly expose their parent values.schema.json through a
+		// test-chart symlink. It is not a separate schema resource; following it
+		// would manufacture a duplicate $id and make resolution depend on the
+		// directory layout rather than the reference graph.
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(path) != ".json" {
 			return nil
 		}
 
@@ -269,14 +319,16 @@ func collectLocalSchemaResources(inputPath string) (*localSchemaRegistry, error)
 			return err
 		}
 		fileURI := (&url.URL{Scheme: "file", Path: absolutePath}).String()
-		registry.documents[fileURI] = absolutePath
-
 		resourceID := fileURI
 		if resourceObject, ok := resource.(map[string]any); ok {
 			if id, ok := resourceObject["$id"].(string); ok && id != "" {
 				resourceID = id
 			}
 		}
+		if existingPath, exists := registry.documents[resourceID]; exists && existingPath != absolutePath {
+			return fmt.Errorf("duplicate schema resource ID %q in %q and %q", resourceID, existingPath, absolutePath)
+		}
+		registry.documents[fileURI] = absolutePath
 		registry.schemas[resourceID] = contents
 		registry.sourceDocuments[resourceID] = contents
 		registry.documents[resourceID] = absolutePath
@@ -306,11 +358,9 @@ func collectLocalSchemaResources(inputPath string) (*localSchemaRegistry, error)
 	}
 	for resourceID, contents := range rawSchemas {
 		normalizedID := normalizedIDs[resourceID]
-		normalizedContents := contents
-		for rawID, compilerID := range normalizedIDs {
-			if rawID != compilerID {
-				normalizedContents = bytes.ReplaceAll(normalizedContents, []byte(rawID), []byte(compilerID))
-			}
+		normalizedContents, normalizeErr := normalizeCompilerDocument(contents, normalizedIDs)
+		if normalizeErr != nil {
+			return nil, fmt.Errorf("failed to normalize schema resource %q: %w", resourceID, normalizeErr)
 		}
 		registry.schemas[normalizedID] = normalizedContents
 		registry.sourceDocuments[normalizedID] = rawSources[resourceID]
@@ -383,6 +433,41 @@ func copyReferenceStack(stack map[*jsonschema.Schema]bool, schema *jsonschema.Sc
 type orderedObject struct {
 	order  []string
 	values map[string]any
+}
+
+// annotationKeywords are safe to expose directly on a dereferenced schema.
+// They do not constrain validation, while retaining them here keeps generated
+// documentation useful when a ref has a local description or default.
+var annotationKeywords = map[string]struct{}{
+	"$comment":    {},
+	"title":       {},
+	"description": {},
+	"default":     {},
+	"deprecated":  {},
+	"readOnly":    {},
+	"writeOnly":   {},
+	"examples":    {},
+}
+
+func hasOnlyAnnotationKeywords(schema map[string]any) bool {
+	for key := range schema {
+		if _, ok := annotationKeywords[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func copyAnnotations(destination, source map[string]any) {
+	for key := range annotationKeywords {
+		if value, ok := source[key]; ok {
+			destination[key] = value
+		}
+	}
+}
+
+func refIgnoresSiblings(dialect jsonschema.Dialect) bool {
+	return dialect == jsonschema.Draft4 || dialect == jsonschema.Draft6 || dialect == jsonschema.Draft7
 }
 
 func (o orderedObject) MarshalJSON() ([]byte, error) {
@@ -489,29 +574,9 @@ func bindSourceSchema(
 		}
 	}
 
-	bindSourceSchemaSlice("allOf", s.AllOf)
-	bindSourceSchemaSlice("anyOf", s.AnyOf)
-	bindSourceSchemaSlice("oneOf", s.OneOf)
-	bindSourceSchemaSlice("prefixItems", s.PrefixItems)
-	for key, child := range map[string]*jsonschema.Schema{
-		"not":                   s.Not,
-		"if":                    s.If,
-		"then":                  s.Then,
-		"else":                  s.Else,
-		"items":                 s.Items,
-		"contains":              s.Contains,
-		"additionalProperties":  s.AdditionalProperties,
-		"propertyNames":         s.PropertyNames,
-		"unevaluatedItems":      s.UnevaluatedItems,
-		"unevaluatedProperties": s.UnevaluatedProperties,
-		"contentSchema":         s.ContentSchema,
-	} {
-		bindSourceSchemaChild(key, child)
-	}
-	bindSourceSchemaMap("$defs", s.Defs)
-	bindSourceSchemaMap("properties", schemaMapValues(s.Properties))
-	bindSourceSchemaMap("patternProperties", schemaMapValues(s.PatternProperties))
-	bindSourceSchemaMap("dependentSchemas", s.DependentSchemas)
+	forEachSchemaSliceChild(s, bindSourceSchemaSlice)
+	forEachSchemaChild(s, bindSourceSchemaChild)
+	forEachSchemaMapChild(s, bindSourceSchemaMap)
 }
 
 func materializeChild(out map[string]any, key string, child *jsonschema.Schema, stack map[*jsonschema.Schema]bool, sources map[*jsonschema.Schema]sourceSchemaNode) error {
@@ -562,54 +627,88 @@ func materializeChildMap(out map[string]any, key string, children map[string]*js
 	return nil
 }
 
-func materializeSchemaChildren(s *jsonschema.Schema, out map[string]any, stack map[*jsonschema.Schema]bool, sources map[*jsonschema.Schema]sourceSchemaNode) error {
-	if err := materializeChildSlice(out, "allOf", s.AllOf, stack, sources); err != nil {
-		return err
-	}
-	if err := materializeChildSlice(out, "anyOf", s.AnyOf, stack, sources); err != nil {
-		return err
-	}
-	if err := materializeChildSlice(out, "oneOf", s.OneOf, stack, sources); err != nil {
-		return err
-	}
-	if err := materializeChildSlice(out, "prefixItems", s.PrefixItems, stack, sources); err != nil {
-		return err
-	}
-	for key, child := range map[string]*jsonschema.Schema{
-		"not":                   s.Not,
-		"if":                    s.If,
-		"then":                  s.Then,
-		"else":                  s.Else,
-		"items":                 s.Items,
-		"contains":              s.Contains,
-		"additionalProperties":  s.AdditionalProperties,
-		"propertyNames":         s.PropertyNames,
-		"unevaluatedItems":      s.UnevaluatedItems,
-		"unevaluatedProperties": s.UnevaluatedProperties,
-		"contentSchema":         s.ContentSchema,
-	} {
-		if err := materializeChild(out, key, child, stack, sources); err != nil {
-			return err
-		}
-	}
-	if err := materializeChildMap(out, "$defs", s.Defs, nil, stack, sources); err != nil {
-		return err
-	}
-	propertyOrder := sources[s].propertyOrder
-	if err := materializeChildMap(out, "properties", schemaMapValues(s.Properties), propertyOrder, stack, sources); err != nil {
-		return err
-	}
-	if err := materializeChildMap(out, "patternProperties", schemaMapValues(s.PatternProperties), nil, stack, sources); err != nil {
-		return err
-	}
-	return materializeChildMap(out, "dependentSchemas", s.DependentSchemas, nil, stack, sources)
-}
-
 func schemaMapValues(value *jsonschema.SchemaMap) map[string]*jsonschema.Schema {
 	if value == nil {
 		return nil
 	}
 	return map[string]*jsonschema.Schema(*value)
+}
+
+// The jsonschema dependency exposes child schemas as several different Go
+// shapes. Keeping their keyword mapping here gives source binding and
+// materialization one authoritative traversal as the dependency evolves.
+func forEachSchemaSliceChild(s *jsonschema.Schema, visit func(string, []*jsonschema.Schema)) {
+	for _, child := range []struct {
+		keyword string
+		value   []*jsonschema.Schema
+	}{
+		{"allOf", s.AllOf},
+		{"anyOf", s.AnyOf},
+		{"oneOf", s.OneOf},
+		{"prefixItems", s.PrefixItems},
+	} {
+		visit(child.keyword, child.value)
+	}
+}
+
+func forEachSchemaMapChild(s *jsonschema.Schema, visit func(string, map[string]*jsonschema.Schema)) {
+	for _, child := range []struct {
+		keyword string
+		value   map[string]*jsonschema.Schema
+	}{
+		{"$defs", s.Defs},
+		{"properties", schemaMapValues(s.Properties)},
+		{"patternProperties", schemaMapValues(s.PatternProperties)},
+		{"dependentSchemas", s.DependentSchemas},
+	} {
+		visit(child.keyword, child.value)
+	}
+}
+
+func forEachSchemaChild(s *jsonschema.Schema, visit func(string, *jsonschema.Schema)) {
+	for _, child := range []struct {
+		keyword string
+		value   *jsonschema.Schema
+	}{
+		{"not", s.Not},
+		{"if", s.If},
+		{"then", s.Then},
+		{"else", s.Else},
+		{"items", s.Items},
+		{"contains", s.Contains},
+		{"additionalProperties", s.AdditionalProperties},
+		{"propertyNames", s.PropertyNames},
+		{"unevaluatedItems", s.UnevaluatedItems},
+		{"unevaluatedProperties", s.UnevaluatedProperties},
+		{"contentSchema", s.ContentSchema},
+	} {
+		visit(child.keyword, child.value)
+	}
+}
+
+func materializeSchemaChildren(s *jsonschema.Schema, out map[string]any, stack map[*jsonschema.Schema]bool, sources map[*jsonschema.Schema]sourceSchemaNode) error {
+	var materializeErr error
+	forEachSchemaSliceChild(s, func(key string, children []*jsonschema.Schema) {
+		if materializeErr == nil {
+			materializeErr = materializeChildSlice(out, key, children, stack, sources)
+		}
+	})
+	forEachSchemaChild(s, func(key string, child *jsonschema.Schema) {
+		if materializeErr == nil {
+			materializeErr = materializeChild(out, key, child, stack, sources)
+		}
+	})
+	forEachSchemaMapChild(s, func(key string, children map[string]*jsonschema.Schema) {
+		if materializeErr != nil {
+			return
+		}
+		var order []string
+		if key == "properties" {
+			order = sources[s].propertyOrder
+		}
+		materializeErr = materializeChildMap(out, key, children, order, stack, sources)
+	})
+	return materializeErr
 }
 
 // materializeSchema expands ordinary $ref edges using kaptinlin's resolved
@@ -653,23 +752,45 @@ func materializeSchemaObject(s *jsonschema.Schema, out map[string]any, stack map
 			if err != nil {
 				return nil, fmt.Errorf("resolve $ref %q: %w", s.Ref, err)
 			}
+			// Draft-04 through Draft-07 specify that sibling keywords are
+			// ignored for a $ref. Modern drafts instead compose them.
+			if refIgnoresSiblings(s.Dialect()) {
+				return target, nil
+			}
 			if targetObject, ok := target.(map[string]any); ok {
 				delete(out, "$ref")
 				if err := materializeSchemaChildren(s, out, copyReferenceStack(stack, s), sources); err != nil {
 					return nil, err
 				}
-				merged := make(map[string]any, len(targetObject)+len(out))
-				maps.Copy(merged, targetObject)
-				maps.Copy(merged, out)
-				out = merged
-			} else if targetBool, ok := target.(bool); ok {
-				if !targetBool {
-					return false, nil
+				if len(out) == 0 {
+					return targetObject, nil
 				}
+				copyAnnotations(targetObject, out)
+				if hasOnlyAnnotationKeywords(out) {
+					return targetObject, nil
+				}
+				// In modern JSON Schema, $ref and its sibling keywords are
+				// conjunctive. A shallow map merge lets a sibling overwrite a
+				// referenced constraint (for example, string → integer), changing
+				// validation semantics. Preserve the target's shape at this node
+				// for downstream generators and put every non-annotation sibling
+				// in an allOf branch.
+				allOf, _ := targetObject["allOf"].([]any)
+				targetObject["allOf"] = append(allOf, out)
+				return targetObject, nil
+			} else if targetBool, ok := target.(bool); ok {
 				delete(out, "$ref")
 				if err := materializeSchemaChildren(s, out, copyReferenceStack(stack, s), sources); err != nil {
 					return nil, err
 				}
+				if len(out) == 0 {
+					return targetBool, nil
+				}
+				allOf := []any{targetBool}
+				if siblings, ok := out["allOf"].([]any); ok {
+					allOf = append(allOf, siblings...)
+				}
+				out["allOf"] = allOf
 			}
 		}
 		if stack[s.ResolvedRef] {
