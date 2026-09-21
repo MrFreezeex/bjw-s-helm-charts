@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,6 +311,72 @@ func TestCollectAllProperties_WithAllOf(t *testing.T) {
 	}
 	if !strings.Contains(contentStr, "| `fromAllOf`") {
 		t.Error("Missing property from allOf")
+	}
+}
+
+func TestGenerator_Generate_RootAllOfProperties(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"allOf": [
+			{
+				"properties": {
+					"settings": {
+						"allOf": [
+							{"properties": {"enabled": {"type": "boolean", "description": "Enable settings"}}}
+						]
+					}
+				}
+			}
+		]
+	}`)
+
+	outputDir := t.TempDir()
+	if err := NewGenerator(outputDir).Generate(schema); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	index, err := os.ReadFile(filepath.Join(outputDir, "index.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), "settings") {
+		t.Errorf("root allOf property is missing from index:\n%s", index)
+	}
+	page, err := os.ReadFile(filepath.Join(outputDir, "settings", "index.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), "enabled") {
+		t.Errorf("nested allOf property is missing from page:\n%s", page)
+	}
+}
+
+func TestGenerator_Generate_RejectsExcessiveNesting(t *testing.T) {
+	nested := any(map[string]any{"type": "string"})
+	for i := 0; i <= maxRecursionDepth; i++ {
+		nested = map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"level": nested,
+			},
+		}
+	}
+	schema, err := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"root": nested,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = NewGenerator(t.TempDir()).Generate(schema)
+	if err == nil {
+		t.Fatal("Generate succeeded, want a nesting-depth error")
+	}
+	if !strings.Contains(err.Error(), "supported documentation depth") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

@@ -1770,7 +1770,7 @@ controllers: {}
     # HPAScaleToZero feature gate is enabled.
     # minReplicas: null
     # -- Maximum number of replicas.
-    # maxReplicas: 0
+    # maxReplicas: 1
     # -- Metrics to use for scaling. Passed through directly to the autoscaling/v2
     # HPA spec.
     # metrics: []
@@ -1964,7 +1964,7 @@ externalSecrets: {}
     # -- Whether the windows allow or deny periodic refreshes.
     # kind: allow
     # -- Schedule and duration pairs defining the refresh windows.
-    # windows: []
+    # windows: [{"duration":"","schedule":""}]
     # -- Target Secret configuration. For more details, see
     # https://external-secrets.io/latest/api/externalsecret/.
     # target: {}
@@ -2402,7 +2402,7 @@ networkpolicies: {}
     # controller via the controller identifier.
     # podSelector: null
     # -- Policy types for the NetworkPolicy.
-    # policyTypes: []
+    # policyTypes: ["Egress"]
     # -- Ingress and egress rules for the NetworkPolicy. See
     # https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-resource
     # for details. Use `- {}` as an item to allow all traffic for that direction.

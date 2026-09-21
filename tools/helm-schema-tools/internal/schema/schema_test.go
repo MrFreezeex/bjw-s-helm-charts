@@ -73,6 +73,28 @@ func TestCollectAllRequired(t *testing.T) {
 	}
 }
 
+func TestCollectAllProperties_DeepCompositionAndCycle(t *testing.T) {
+	root := &jsonschema.Schema{}
+	current := root
+	for range 40 {
+		next := &jsonschema.Schema{}
+		current.AllOf = []*jsonschema.Schema{next}
+		current = next
+	}
+	props := jsonschema.SchemaMap{"deep": {}}
+	current.Properties = &props
+
+	// A back-edge models a recursive in-memory schema graph. It must not turn
+	// a deep, otherwise valid walk into either a stack overflow or a silent
+	// fixed-depth truncation.
+	current.AllOf = []*jsonschema.Schema{root}
+
+	got := CollectAllProperties(root)
+	if _, ok := got["deep"]; !ok {
+		t.Errorf("deep property was silently omitted: %#v", got)
+	}
+}
+
 func TestHasAnyProperties_Nil(t *testing.T) {
 	if HasAnyProperties(nil) {
 		t.Error("HasAnyProperties(nil) should return false")

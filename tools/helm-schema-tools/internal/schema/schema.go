@@ -17,24 +17,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// maxCollectDepth guards against stack overflow from circular schema references.
-const maxCollectDepth = 32
-
 // CollectAllProperties recursively collects properties from a schema including
 // allOf, oneOf, and anyOf composition branches. Direct properties take
 // precedence; the first occurrence of a key wins. For oneOf/anyOf, only the
 // first branch is visited — every allOf branch is always included.
 func CollectAllProperties(schema *jsonschema.Schema) map[string]*jsonschema.Schema {
-	return collectProps(schema, 0)
+	return collectProps(schema, make(map[*jsonschema.Schema]struct{}))
 }
 
-// collectProps is the recursion-guarded implementation of CollectAllProperties.
-// depth is the current nesting level; returning nil when it reaches
-// maxCollectDepth prevents stack overflow from cyclic schemas.
-func collectProps(schema *jsonschema.Schema, depth int) map[string]*jsonschema.Schema {
-	if depth >= maxCollectDepth {
+// collectProps is the cycle-safe implementation of CollectAllProperties.
+// Schema graphs can contain a reference cycle, while valid non-cyclic schemas
+// may be deeper than any arbitrary nesting limit. Track visited nodes instead
+// of silently omitting properties after a fixed depth.
+func collectProps(schema *jsonschema.Schema, visited map[*jsonschema.Schema]struct{}) map[string]*jsonschema.Schema {
+	if schema == nil {
 		return nil
 	}
+	if _, seen := visited[schema]; seen {
+		return nil
+	}
+	visited[schema] = struct{}{}
 
 	props := make(map[string]*jsonschema.Schema)
 	if schema.Properties != nil {
@@ -45,7 +47,7 @@ func collectProps(schema *jsonschema.Schema, depth int) map[string]*jsonschema.S
 		if len(subs) == 0 {
 			return
 		}
-		for k, v := range collectProps(subs[0], depth+1) {
+		for k, v := range collectProps(subs[0], visited) {
 			if _, exists := props[k]; !exists {
 				props[k] = v
 			}
@@ -53,7 +55,7 @@ func collectProps(schema *jsonschema.Schema, depth int) map[string]*jsonschema.S
 	}
 
 	for _, sub := range schema.AllOf {
-		for k, v := range collectProps(sub, depth+1) {
+		for k, v := range collectProps(sub, visited) {
 			if _, exists := props[k]; !exists {
 				props[k] = v
 			}
@@ -70,23 +72,27 @@ func collectProps(schema *jsonschema.Schema, depth int) map[string]*jsonschema.S
 // allOf branch plus the first oneOf/anyOf branch). This keeps the required
 // set consistent with the properties visible at the same schema node.
 func CollectAllRequired(schema *jsonschema.Schema) []string {
-	return collectRequired(schema, 0)
+	return collectRequired(schema, make(map[*jsonschema.Schema]struct{}))
 }
 
-func collectRequired(schema *jsonschema.Schema, depth int) []string {
-	if depth >= maxCollectDepth {
+func collectRequired(schema *jsonschema.Schema, visited map[*jsonschema.Schema]struct{}) []string {
+	if schema == nil {
 		return nil
 	}
+	if _, seen := visited[schema]; seen {
+		return nil
+	}
+	visited[schema] = struct{}{}
 	required := make([]string, 0, len(schema.Required))
 	required = append(required, schema.Required...)
 	for _, sub := range schema.AllOf {
-		required = append(required, collectRequired(sub, depth+1)...)
+		required = append(required, collectRequired(sub, visited)...)
 	}
 	if len(schema.OneOf) > 0 {
-		required = append(required, collectRequired(schema.OneOf[0], depth+1)...)
+		required = append(required, collectRequired(schema.OneOf[0], visited)...)
 	}
 	if len(schema.AnyOf) > 0 {
-		required = append(required, collectRequired(schema.AnyOf[0], depth+1)...)
+		required = append(required, collectRequired(schema.AnyOf[0], visited)...)
 	}
 	return required
 }

@@ -435,6 +435,81 @@ func TestGenerator_Generate_TypedConstValues(t *testing.T) {
 	}
 }
 
+func TestGenerator_Generate_RequiredConstrainedPlaceholders(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"required": ["name", "port", "labels"],
+		"properties": {
+			"name": {"type": "string", "minLength": 3, "pattern": "^[a-z]+$"},
+			"port": {"type": "integer", "minimum": 1024},
+			"labels": {
+				"type": "array",
+				"minItems": 2,
+				"items": {"type": "string", "minLength": 2}
+			}
+		}
+	}`)
+
+	generated, err := NewGenerator().Generate(schema)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	var values map[string]any
+	if err := yaml.Unmarshal(generated, &values); err != nil {
+		t.Fatalf("generated YAML is invalid: %v\n%s", err, generated)
+	}
+	compiled, err := schemautil.Compile(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := compiled.ValidateJSON(encoded); !result.Valid {
+		t.Errorf("generated constrained placeholders do not satisfy the schema: %#v\n%s", result.Errors, generated)
+	}
+}
+
+func TestGenerator_Generate_RequiredUnsynthesizablePlaceholderFails(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"required": ["code"],
+		"properties": {
+			"code": {"type": "string", "pattern": "^[0-9]{5}$"}
+		}
+	}`)
+
+	_, err := NewGenerator().Generate(schema)
+	if err == nil {
+		t.Fatal("Generate succeeded, want an error for an unsynthesizable required value")
+	}
+	if !strings.Contains(err.Error(), "cannot generate a valid placeholder for required string") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestGenerator_Generate_RootAllOfProperties(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"allOf": [
+			{
+				"required": ["enabled"],
+				"properties": {"enabled": {"type": "boolean", "default": true}}
+			}
+		]
+	}`)
+
+	generated, err := NewGenerator().Generate(schema)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if !strings.Contains(string(generated), "enabled: true") {
+		t.Errorf("allOf property is missing from generated values:\n%s", generated)
+	}
+}
+
 func TestGenerator_Generate_InferredObjectType(t *testing.T) {
 	schema := []byte(`{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",

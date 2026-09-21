@@ -73,7 +73,7 @@ func typeString(schema *jsonschema.Schema) string {
 		}
 		return strings.Join(schema.Type, " / ")
 	}
-	if schema.Properties != nil || schema.AdditionalProperties != nil {
+	if schemautil.HasAnyProperties(schema) || schema.AdditionalProperties != nil {
 		return "object"
 	}
 	if schema.Items != nil {
@@ -82,8 +82,10 @@ func typeString(schema *jsonschema.Schema) string {
 	if len(schema.Enum) > 0 {
 		return "enum"
 	}
-	// Collect types from oneOf/anyOf branches for union types like `string | object`.
-	types := collectBranchTypes(schema.OneOf)
+	// Collect types from composition branches for schemas that express their
+	// type indirectly.
+	types := collectBranchTypes(schema.AllOf)
+	types = append(types, collectBranchTypes(schema.OneOf)...)
 	types = append(types, collectBranchTypes(schema.AnyOf)...)
 	if len(types) > 0 {
 		return strings.Join(schemautil.DeduplicateStrings(types), " / ")
@@ -157,7 +159,7 @@ func hasNestedContent(schema *jsonschema.Schema) bool {
 	if schema == nil {
 		return false
 	}
-	if schema.Properties != nil && len(*schema.Properties) > 0 {
+	if len(schemautil.CollectAllProperties(schema)) > 0 {
 		return true
 	}
 	if schema.AdditionalProperties != nil {
